@@ -114,6 +114,7 @@ def write_cases(pattern: str) -> tuple[BenchmarkCase, ...]:
                 operation_type="write",
                 size_bytes=size,
                 sql=f"INSERT INTO dpu_test.{table} {columns} VALUES {', '.join(values)}",
+                explain=True,
             )
         )
     return tuple(cases)
@@ -270,6 +271,7 @@ def compute_group() -> BenchmarkGroup:
                 CROSS JOIN dpu_test.compute_test t3
                 CROSS JOIN dpu_test.compute_test t4
                 """,
+                explain=True,
             ),
             BenchmarkCase(
                 "sort_3col_125k",
@@ -284,6 +286,7 @@ def compute_group() -> BenchmarkGroup:
                 ORDER BY t1.id, t2.id, t3.id
                 """,
                 fetch=True,
+                explain=True,
             ),
             BenchmarkCase(
                 "regex_simple",
@@ -292,6 +295,7 @@ def compute_group() -> BenchmarkGroup:
                 0,
                 "SELECT id, text_col FROM dpu_test.compute_test WHERE text_col ~ '^[A-Za-z0-9]'",
                 fetch=True,
+                explain=True,
             ),
         ),
     )

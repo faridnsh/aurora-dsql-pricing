@@ -55,7 +55,8 @@ def source_paths(args: argparse.Namespace) -> dict[str, Path]:
 def load_records(paths: dict[str, Path]) -> tuple[list[dict], list[str]]:
     records: list[dict] = []
     skipped: list[str] = []
-    required = ["size_bytes", "BytesRead", "ReadDPU", "ComputeTime"]
+    required = ["size_bytes", "BytesRead", "ComputeTime"]
+    dpu_required = ["ReadDPU"]
 
     for label, key, _, _ in SOURCES:
         path = paths[key]
@@ -73,6 +74,11 @@ def load_records(paths: dict[str, Path]) -> tuple[list[dict], list[str]]:
                 continue
 
             missing = [field for field in required if field not in record]
+            missing.extend(
+                field
+                for field in dpu_required
+                if field not in record and f"CloudWatch{field}" not in record
+            )
             if missing:
                 skipped.append(f"{path}:{line_number}: missing {', '.join(missing)}")
                 continue
@@ -85,8 +91,16 @@ def load_records(paths: dict[str, Path]) -> tuple[list[dict], list[str]]:
     return records, skipped
 
 
+def metric_value(record: dict, field: str) -> float:
+    if field.endswith("DPU"):
+        cloudwatch_field = f"CloudWatch{field}"
+        if cloudwatch_field in record:
+            return float(record[cloudwatch_field])
+    return float(record[field])
+
+
 def values(records: list[dict], field: str) -> np.ndarray:
-    return np.array([float(record[field]) for record in records], dtype=float)
+    return np.array([metric_value(record, field) for record in records], dtype=float)
 
 
 def human_bytes(value: float) -> str:
@@ -218,8 +232,16 @@ def plot_serial_pk_dpu_breakdown(records: list[dict], output_dir: Path) -> None:
     rows.sort(key=lambda record: int(record["size_bytes"]))
     sizes_mb = values(rows, "size_bytes") / (1024 * 1024)
     read_dpu = values(rows, "ReadDPU")
-    write_dpu = np.array([float(record.get("WriteDPU", 0)) for record in rows], dtype=float)
-    compute_dpu = np.array([float(record.get("ComputeDPU", 0)) for record in rows], dtype=float)
+    write_dpu = np.array(
+        [
+            metric_value(record, "WriteDPU")
+            if "WriteDPU" in record or "CloudWatchWriteDPU" in record
+            else 0
+            for record in rows
+        ],
+        dtype=float,
+    )
+    compute_dpu = values(rows, "ComputeDPU")
 
     fig, ax = plt.subplots(figsize=(16, 7), constrained_layout=True)
     ax.fill_between(sizes_mb, 0, read_dpu, alpha=0.7, label="ReadDPU", color="#1f77b4")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+import re
 from typing import Callable
 
 import boto3
@@ -62,14 +63,43 @@ class DSQLClient:
         raise last_error or RuntimeError(f"Could not connect to {cluster_id}")
 
 
-def execute_query(conn, sql: str, fetch_mode: str = "all", explain: bool = False) -> tuple[int | None, str | None]:
+EXPLAIN_DPU_RE = re.compile(r"^\s*(Compute|Read|Write|Total):\s+([0-9.]+)\s+DPU\s*$")
+EXPLAIN_DPU_FIELD_NAMES = {
+    "Compute": "ComputeDPU",
+    "Read": "ReadDPU",
+    "Write": "WriteDPU",
+    "Total": "TotalDPU",
+}
+
+
+def parse_explain_dpu(explain_output: str) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+    in_statement_dpu = False
+    for line in explain_output.splitlines():
+        if line.strip() == "Statement DPU Estimate:":
+            in_statement_dpu = True
+            continue
+        if not in_statement_dpu:
+            continue
+        match = EXPLAIN_DPU_RE.match(line)
+        if match:
+            metrics[EXPLAIN_DPU_FIELD_NAMES[match.group(1)]] = float(match.group(2))
+            continue
+        if line and not line.startswith(" "):
+            break
+    return metrics
+
+
+def execute_query(conn, sql: str, fetch_mode: str = "all", explain: bool = False) -> tuple[int | None, str | None, dict[str, float]]:
     with conn.cursor() as cursor:
-        cursor.execute(f"EXPLAIN (ANALYZE, SETTINGS) {sql}" if explain else sql)
+        cursor.execute(f"EXPLAIN (ANALYZE, VERBOSE, SETTINGS) {sql}" if explain else sql)
         rows_returned = None
         explain_output = None
+        explain_dpu: dict[str, float] = {}
         if cursor.description:
             if explain:
                 explain_output = "\n".join(row[0] for row in cursor.fetchall())
+                explain_dpu = parse_explain_dpu(explain_output)
             elif fetch_mode == "all":
                 rows_returned = len(cursor.fetchall())
             elif fetch_mode == "one":
@@ -79,7 +109,7 @@ def execute_query(conn, sql: str, fetch_mode: str = "all", explain: bool = False
             else:
                 raise ValueError(f"Unknown fetch mode: {fetch_mode}")
         conn.commit()
-        return rows_returned, explain_output
+        return rows_returned, explain_output, explain_dpu
 
 
 def execute_sql(
@@ -90,12 +120,12 @@ def execute_sql(
     fetch_mode: str = "all",
     explain: bool = False,
     conn=None,
-) -> tuple[float, int | None, str | None]:
+) -> tuple[float, int | None, str | None, dict[str, float]]:
     close_conn = conn is None
     conn = conn or client.connect(cluster_id, region)
     start = time.monotonic()
-    rows_returned, explain_output = execute_query(conn, sql, fetch_mode=fetch_mode, explain=explain)
+    rows_returned, explain_output, explain_dpu = execute_query(conn, sql, fetch_mode=fetch_mode, explain=explain)
     elapsed = time.monotonic() - start
     if close_conn:
         conn.close()
-    return elapsed, rows_returned, explain_output
+    return elapsed, rows_returned, explain_output, explain_dpu

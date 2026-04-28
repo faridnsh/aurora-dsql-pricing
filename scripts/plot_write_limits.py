@@ -120,10 +120,8 @@ def load_records(paths: dict[str, Path], exclude_size_bytes: int) -> tuple[list[
         "BytesWritten",
         "BytesRead",
         "ComputeTime",
-        "WriteDPU",
-        "ReadDPU",
-        "ComputeDPU",
     ]
+    dpu_required = ["WriteDPU", "ReadDPU", "ComputeDPU"]
 
     for label, key, _, _ in SOURCES:
         path = paths[key]
@@ -143,6 +141,11 @@ def load_records(paths: dict[str, Path], exclude_size_bytes: int) -> tuple[list[
                 continue
 
             missing = [field for field in required if field not in record]
+            missing.extend(
+                field
+                for field in dpu_required
+                if field not in record and f"CloudWatch{field}" not in record
+            )
             if missing:
                 skipped.append(f"{path}:{line_number}: missing {', '.join(missing)}")
                 continue
@@ -155,8 +158,16 @@ def load_records(paths: dict[str, Path], exclude_size_bytes: int) -> tuple[list[
     return records, skipped
 
 
+def metric_value(record: dict, field: str) -> float:
+    if field.endswith("DPU"):
+        cloudwatch_field = f"CloudWatch{field}"
+        if cloudwatch_field in record:
+            return float(record[cloudwatch_field])
+    return float(record[field])
+
+
 def values(records: list[dict], field: str) -> np.ndarray:
-    return np.array([float(record[field]) for record in records], dtype=float)
+    return np.array([metric_value(record, field) for record in records], dtype=float)
 
 
 def point_ticks(records: list[dict], field: str, divisor: int = 1) -> list[float]:
@@ -206,6 +217,10 @@ def fit_line(x_values: np.ndarray, y_values: np.ndarray) -> tuple[float, float, 
     return slope, intercept, r_squared
 
 
+def can_fit(x_values: np.ndarray, y_values: np.ndarray) -> bool:
+    return len(x_values) >= 2 and len(y_values) >= 2
+
+
 def x_divisor(field: str) -> int:
     if field in {"BytesWritten", "BytesRead"}:
         return 1024 * 1024
@@ -234,6 +249,8 @@ def plot_chart(records: list[dict], output_dir: Path, chart: tuple) -> None:
         y_values = values(rows, y_field) / y_divisor
         ax.scatter(x_values, y_values, label=label, s=52, marker=marker, color=color, alpha=0.88)
 
+        if not can_fit(x_values, y_values):
+            continue
         slope, intercept, r_squared = fit_line(x_values, y_values)
         x_line = np.linspace(x_values.min(), x_values.max(), 200)
         ax.plot(
@@ -271,6 +288,8 @@ def plot_combined_bytes_io(records: list[dict], output_dir: Path, log_y: bool = 
         x_values = values(rows, "size_bytes")
         written_mb = values(rows, "BytesWritten") / (1024 * 1024)
         read_mb = values(rows, "BytesRead") / (1024 * 1024)
+        if len(x_values) == 0:
+            continue
 
         ax.scatter(
             x_values,
@@ -294,6 +313,8 @@ def plot_combined_bytes_io(records: list[dict], output_dir: Path, log_y: bool = 
             alpha=0.9,
         )
 
+        if not can_fit(x_values, written_mb) or not can_fit(x_values, read_mb):
+            continue
         written_slope, written_intercept, _ = fit_line(x_values, written_mb)
         read_slope, read_intercept, _ = fit_line(x_values, read_mb)
         x_line = np.linspace(x_values.min(), x_values.max(), 200)
@@ -383,6 +404,8 @@ def plot_large_writes_byteswritten(records: list[dict], output_dir: Path, loglog
         y_values = values(rows, "BytesWritten")
         ax.scatter(x_values, y_values, label=label, s=58, marker=marker, color=color, alpha=0.88)
 
+        if not can_fit(x_values, y_values):
+            continue
         slope, intercept, r_squared = fit_line(x_values, y_values)
         if loglog:
             x_line = np.geomspace(x_values.min(), x_values.max(), 200)
@@ -431,6 +454,8 @@ def plot_large_writes_writedpu(records: list[dict], output_dir: Path) -> None:
         y_values = values(rows, "WriteDPU")
         ax.scatter(x_values, y_values, label=label, s=58, marker=marker, color=color, alpha=0.88)
 
+        if not can_fit(x_values, y_values):
+            continue
         slope, intercept, r_squared = fit_line(x_values, y_values)
         x_line = np.linspace(x_values.min(), x_values.max(), 200)
         ax.plot(
@@ -461,6 +486,8 @@ def plot_overview(records: list[dict], output_dir: Path) -> None:
             y_values = values(rows, y_field) / y_divisor
             ax.scatter(x_values, y_values, label=label, s=34, marker=marker, color=color, alpha=0.85)
 
+            if not can_fit(x_values, y_values):
+                continue
             slope, intercept, _ = fit_line(x_values, y_values)
             x_line = np.linspace(x_values.min(), x_values.max(), 150)
             ax.plot(x_line, slope * x_line + intercept, color=color, alpha=0.55, linewidth=1.2)

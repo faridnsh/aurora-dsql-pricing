@@ -17,6 +17,7 @@ from generate_workload_sql import BenchmarkCase, BenchmarkGroup, blog_groups
 from dsql_client import DSQLClient, DSQLConfig, execute_sql
 
 METRIC_NAMES = ["WriteDPU", "ReadDPU", "ComputeDPU", "BytesWritten", "BytesRead", "ComputeTime"]
+DPU_METRIC_NAMES = {"WriteDPU", "ReadDPU", "ComputeDPU", "TotalDPU"}
 SETUP_GAP_SECONDS = 60
 CLOUDWATCH_WAIT_SECONDS = 180
 CLOUDWATCH_PERIOD_SECONDS = 60
@@ -101,7 +102,6 @@ class BlogBenchmarkRunner:
         output = self.output_dir / f"{group.name}_results.jsonl"
 
         self.log(group.name, f"Starting {group.name}: {len(group.cases)} cases, output={output}")
-        start_time = datetime.now(timezone.utc)
 
         setup_jobs = []
         if group.setup_sql:
@@ -123,6 +123,9 @@ class BlogBenchmarkRunner:
             self.log(group.name, f"Waiting {SETUP_GAP_SECONDS}s after setup")
             time.sleep(SETUP_GAP_SECONDS)
 
+        # Start the CloudWatch measurement window after setup so read benchmarks
+        # do not include table creation or seed writes in their DPU totals.
+        start_time = datetime.now(timezone.utc)
         self.log(group.name, f"Running {len(group.cases)} cases in parallel")
         records: list[dict | None] = [None] * len(group.cases)
         with ThreadPoolExecutor(max_workers=len(group.cases)) as executor:
@@ -142,7 +145,19 @@ class BlogBenchmarkRunner:
             for record in records:
                 if record is None:
                     continue
-                record.update(metrics.get(record["cluster_id"], {}))
+                cloudwatch_metrics = metrics.get(record["cluster_id"], {})
+                for metric_name, metric_value in cloudwatch_metrics.items():
+                    if metric_name in DPU_METRIC_NAMES:
+                        record[f"CloudWatch{metric_name}"] = metric_value
+                    else:
+                        record[metric_name] = metric_value
+                explain_dpu = record.pop("explain_dpu", {})
+                if explain_dpu:
+                    record.update(explain_dpu)
+                    record["dpu_source"] = "explain_analyze_verbose"
+                else:
+                    record.update({name: value for name, value in cloudwatch_metrics.items() if name in DPU_METRIC_NAMES})
+                    record["dpu_source"] = "cloudwatch"
                 handle.write(json.dumps(record, sort_keys=True) + "\n")
 
         self.log(group.name, f"Wrote {output}")
@@ -164,7 +179,7 @@ class BlogBenchmarkRunner:
         self.log(name, f"Running {index + 1}/{total} on {cluster.number}:{cluster.cluster_id[:8]} - {case.description}")
         try:
             conn = self.cluster_connection(cluster)
-            elapsed, rows_returned, explain_output = execute_sql(
+            elapsed, rows_returned, explain_output, explain_dpu = execute_sql(
                 self.client,
                 cluster.cluster_id,
                 cluster.region,
@@ -180,6 +195,8 @@ class BlogBenchmarkRunner:
                 record["rows_returned"] = rows_returned
             if explain_output is not None:
                 record["explain_output"] = explain_output
+            if explain_dpu:
+                record["explain_dpu"] = explain_dpu
         except Exception as exc:
             record["timestamp_end"] = datetime.now(timezone.utc).isoformat()
             record["error"] = str(exc)
